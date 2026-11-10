@@ -89,6 +89,20 @@ export interface ClerkSession extends Entity {
   updated_at_unix: number;
 }
 
+/**
+ * A FAPI client: one browser or native app install. clerk-js identifies it with
+ * a dev browser token (`__clerk_db_jwt`, development instances), the `__client`
+ * cookie (production instances) or the `Authorization` header (native apps).
+ * The same opaque `token` serves all three.
+ */
+export interface ClerkClient extends Entity {
+  client_id: string;
+  token: string;
+  last_active_session_id: string | null;
+  created_at_unix: number;
+  updated_at_unix: number;
+}
+
 export interface ClerkOrganizationDomain extends Entity {
   domain_id: string;
   name: string;

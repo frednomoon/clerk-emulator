@@ -173,7 +173,7 @@ describe("Clerk plugin integration", () => {
       const body = (await res.json()) as { keys: Array<Record<string, unknown>> };
       expect(body.keys).toHaveLength(1);
       expect(body.keys[0].kty).toBe("RSA");
-      expect(body.keys[0].kid).toBe("emulate-clerk-1");
+      expect(body.keys[0].kid).toMatch(/^ins_emulate_/);
       expect(body.keys[0].alg).toBe("RS256");
       expect(body.keys[0].use).toBe("sig");
     });

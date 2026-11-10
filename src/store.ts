@@ -6,6 +6,7 @@ import type {
   ClerkOrganizationMembership,
   ClerkOrganizationInvitation,
   ClerkSession,
+  ClerkClient,
   ClerkOAuthApplication,
   ClerkOrganizationDomain,
   ClerkM2MToken,
@@ -18,6 +19,7 @@ export interface ClerkStore {
   memberships: Collection<ClerkOrganizationMembership>;
   invitations: Collection<ClerkOrganizationInvitation>;
   sessions: Collection<ClerkSession>;
+  clients: Collection<ClerkClient>;
   oauthApps: Collection<ClerkOAuthApplication>;
   organizationDomains: Collection<ClerkOrganizationDomain>;
   m2mTokens: Collection<ClerkM2MToken>;
@@ -34,7 +36,8 @@ export function getClerkStore(store: Store): ClerkStore {
       "user_id",
     ]),
     invitations: store.collection<ClerkOrganizationInvitation>("clerk.invitations", ["invitation_id", "org_id"]),
-    sessions: store.collection<ClerkSession>("clerk.sessions", ["clerk_id", "user_id"]),
+    sessions: store.collection<ClerkSession>("clerk.sessions", ["clerk_id", "user_id", "client_id"]),
+    clients: store.collection<ClerkClient>("clerk.clients", ["client_id", "token"]),
     oauthApps: store.collection<ClerkOAuthApplication>("clerk.oauth_apps", ["app_id", "client_id"]),
     organizationDomains: store.collection<ClerkOrganizationDomain>("clerk.org_domains", ["domain_id", "org_id"]),
     m2mTokens: store.collection<ClerkM2MToken>("clerk.m2m_tokens", ["token_id", "subject"]),

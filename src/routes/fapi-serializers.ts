@@ -2,7 +2,8 @@ import type { Store } from "../framework/index.js";
 import { userResponse, resolvePrimaryOrgClaims } from "../route-helpers.js";
 import { getClerkStore } from "../store.js";
 import { createSessionToken, type SessionTokenVersion } from "./oauth.js";
-import type { ClerkUser, ClerkSession, ClerkOrganizationMembership } from "../entities.js";
+import type { ClerkUser, ClerkSession, ClerkOrganizationMembership, ClerkClient } from "../entities.js";
+import { activeSessionsForClient, reloadClient } from "./fapi-client.js";
 
 // FAPI projection layer: builds the client/session/membership JSON shapes that
 // clerk-js consumes. FAPI uses millisecond timestamps and embeds resources
@@ -104,25 +105,27 @@ export async function buildSessionJson(
 export async function buildClientJson(
   store: Store,
   baseUrl: string,
-  activeSessionId?: string | null,
-  now = Date.now(),
+  client: ClerkClient,
   tokenVersion: SessionTokenVersion = 1,
 ) {
-  const cs = getClerkStore(store);
-  const sessions = cs.sessions.all().filter((s) => s.status === "active");
+  const current = reloadClient(store, client);
+  const sessions = activeSessionsForClient(store, current);
   const sessionJsons = await Promise.all(sessions.map((s) => buildSessionJson(store, baseUrl, s, tokenVersion)));
+  const lastActive = sessions.some((s) => s.clerk_id === current.last_active_session_id)
+    ? current.last_active_session_id
+    : (sessionJsons[0]?.id as string | undefined) ?? null;
 
   return {
     object: "client",
-    id: "client_emulate",
+    id: current.client_id,
     sessions: sessionJsons,
     sign_up: null,
     sign_in: null,
-    last_active_session_id: activeSessionId ?? sessionJsons[0]?.id ?? null,
+    last_active_session_id: lastActive,
     last_authentication_strategy: null,
     cookie_expires_at: null,
-    created_at: now,
-    updated_at: now,
+    created_at: current.created_at_unix * 1000,
+    updated_at: current.updated_at_unix * 1000,
   };
 }
 
@@ -133,16 +136,17 @@ export async function fapiResponse(
   response: unknown,
   store: Store,
   baseUrl: string,
-  activeSessionId?: string | null,
+  client: ClerkClient,
+  tokenVersion: SessionTokenVersion = 1,
   embedSignIn?: Record<string, unknown> | null,
   embedSignUp?: Record<string, unknown> | null,
 ) {
-  const client = await buildClientJson(store, baseUrl, activeSessionId);
+  const clientJson = await buildClientJson(store, baseUrl, client, tokenVersion);
   if (embedSignIn !== undefined) {
-    (client as Record<string, unknown>).sign_in = embedSignIn;
+    (clientJson as Record<string, unknown>).sign_in = embedSignIn;
   }
   if (embedSignUp !== undefined) {
-    (client as Record<string, unknown>).sign_up = embedSignUp;
+    (clientJson as Record<string, unknown>).sign_up = embedSignUp;
   }
-  return { response, client };
+  return { response, client: clientJson };
 }

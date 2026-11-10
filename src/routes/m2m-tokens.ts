@@ -7,7 +7,7 @@ import {
   readJsonBody,
 } from "../route-helpers.js";
 import { getClerkStore } from "../store.js";
-import { keyPairPromise, KID } from "./oauth.js";
+import { keyPairPromise } from "./oauth.js";
 import { SignJWT } from "jose";
 import type { ClerkM2MToken } from "../entities.js";
 
@@ -51,7 +51,7 @@ export function m2mTokenRoutes({ app, store, baseUrl, tokenMap }: RouteContext):
     let tokenString: string;
 
     if (tokenFormat === "jwt") {
-      const { privateKey } = await keyPairPromise;
+      const { privateKey, kid } = await keyPairPromise;
       const jwtClaims: Record<string, unknown> = {
         scopes: subject,
       };
@@ -60,7 +60,7 @@ export function m2mTokenRoutes({ app, store, baseUrl, tokenMap }: RouteContext):
       }
 
       const builder = new SignJWT(jwtClaims)
-        .setProtectedHeader({ alg: "RS256", kid: KID, typ: "JWT" })
+        .setProtectedHeader({ alg: "RS256", kid, typ: "JWT" })
         .setIssuer(baseUrl)
         .setSubject(subject)
         .setJti(tokenId)

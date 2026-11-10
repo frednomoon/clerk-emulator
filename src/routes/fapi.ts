@@ -4,9 +4,18 @@ import { clerkError, userResponse, resolvePrimaryOrgClaims, clerkApiTokenVersion
 import { getClerkStore } from "../store.js";
 import { createSessionToken } from "./oauth.js";
 import { buildEnvironmentJson } from "./fapi-environment.js";
-import { fapiResponse, buildClientJson, buildSessionJson, fapiMembershipJson } from "./fapi-serializers.js";
+import { fapiResponse, buildSessionJson, fapiMembershipJson } from "./fapi-serializers.js";
 import { dispatchClerkEvent } from "../webhook-events.js";
-import type { ClerkUser } from "../entities.js";
+import type { ClerkClient, ClerkUser } from "../entities.js";
+import {
+  activeSessionsForClient,
+  createClient,
+  resolveClient,
+  resolveFlowClient,
+  touchClient,
+  writeClientCredentials,
+  type ResolvedClient,
+} from "./fapi-client.js";
 
 // clerk-js posts FAPI bodies as application/x-www-form-urlencoded (with a JSON fallback).
 async function readFapiBody(c: Context<AppEnv>): Promise<Record<string, string>> {
@@ -45,6 +54,7 @@ type Verification = { status: "verified" | "unverified"; strategy: string } | nu
 
 type PendingSignIn = {
   id: string;
+  client: ClerkClient;
   user: ClerkUser;
   status: "needs_first_factor" | "needs_second_factor" | "complete";
   createdSessionId: string | null;
@@ -61,13 +71,14 @@ function getSignIns(store: Store): Map<string, PendingSignIn> {
   return map;
 }
 
-// Create an active session and mark the sign-in complete.
-function completeSignIn(cs: ReturnType<typeof getClerkStore>, signIn: PendingSignIn) {
+// Create an active session on the signing-in client and mark the sign-in complete.
+function completeSignIn(store: Store, signIn: PendingSignIn) {
+  const cs = getClerkStore(store);
   const now = nowUnix();
   const session = cs.sessions.insert({
     clerk_id: generateClerkId("sess_"),
     user_id: signIn.user.clerk_id,
-    client_id: "client_emulate",
+    client_id: signIn.client.client_id,
     status: "active",
     last_active_at: now,
     expire_at: now + 86400,
@@ -77,16 +88,18 @@ function completeSignIn(cs: ReturnType<typeof getClerkStore>, signIn: PendingSig
   });
   signIn.status = "complete";
   signIn.createdSessionId = session.clerk_id;
+  // A new session changes the client, which moves __client_uat on.
+  touchClient(store, signIn.client, { last_active_session_id: session.clerk_id });
   return session;
 }
 
 // First factor verified with `strategy`: go to MFA if the user has TOTP enabled, else complete.
-function advanceAfterFirstFactor(cs: ReturnType<typeof getClerkStore>, signIn: PendingSignIn, strategy: string): void {
+function advanceAfterFirstFactor(store: Store, signIn: PendingSignIn, strategy: string): void {
   signIn.firstFactorVerification = { status: "verified", strategy };
   if (signIn.user.totp_enabled) {
     signIn.status = "needs_second_factor";
   } else {
-    completeSignIn(cs, signIn);
+    completeSignIn(store, signIn);
   }
 }
 
@@ -127,6 +140,7 @@ function signInJson(cs: ReturnType<typeof getClerkStore>, signIn: PendingSignIn)
 
 type PendingSignUp = {
   id: string;
+  client: ClerkClient;
   email_address: string;
   password: string | null;
   first_name: string | null;
@@ -179,39 +193,62 @@ function signUpJson(signUp: PendingSignUp): Record<string, unknown> {
 export function fapiRoutes({ app, store, webhooks, baseUrl }: RouteContext): void {
   const cs = getClerkStore(store);
 
-  // Dev browser init
+  // Every FAPI response carries the requesting client, and hands its
+  // credentials back the way that client's transport expects.
+  const respond = async (
+    c: Context<AppEnv>,
+    resolved: ResolvedClient,
+    response: unknown,
+    embeds: { signIn?: Record<string, unknown>; signUp?: Record<string, unknown> } = {},
+  ) => {
+    writeClientCredentials(c, store, resolved);
+    return c.json(
+      await fapiResponse(response, store, baseUrl, resolved.client, clerkApiTokenVersion(c), embeds.signIn, embeds.signUp),
+    );
+  };
+
+  // Dev browser init: each browser gets its own client. clerk-js stores the
+  // token in the __clerk_db_jwt cookie and sends it on every FAPI request.
   app.post("/v1/dev_browser", (c) => {
-    const jwt = "emulate_dev_browser_jwt";
-    c.header("Clerk-Db-Jwt", jwt);
-    return c.json({ id: jwt });
+    const client = createClient(store);
+    c.header("Clerk-Db-Jwt", client.token);
+    return c.json({ id: client.token });
   });
 
   // Environment (clerk-js sends GET or POST depending on version)
   const environmentHandler = async (c: Context<AppEnv>) =>
-    c.json(await fapiResponse(buildEnvironmentJson(baseUrl), store, baseUrl));
+    respond(c, resolveClient(c, store), buildEnvironmentJson(baseUrl));
   app.get("/v1/environment", environmentHandler);
   app.post("/v1/environment", environmentHandler);
 
   // Client
-  const clientHandler = async (c: Context<AppEnv>) =>
-    c.json(await fapiResponse(await buildClientJson(store, baseUrl, undefined, undefined, clerkApiTokenVersion(c)), store, baseUrl));
+  const clientHandler = async (c: Context<AppEnv>) => {
+    const resolved = resolveClient(c, store);
+    const { client } = await fapiResponse(null, store, baseUrl, resolved.client, clerkApiTokenVersion(c));
+    return respond(c, resolved, client);
+  };
   app.get("/v1/client", clientHandler);
   app.post("/v1/client", clientHandler);
 
   // Sign-in: create
   app.post("/v1/client/sign_ins", async (c) => {
+    const resolved = resolveClient(c, store);
     const body = await readFapiBody(c);
     const identifier = (body.identifier as string) ?? "";
 
+    // Clerk accepts an email address or a username as the identifier.
     const email = cs.emailAddresses.findOneBy("email_address", identifier);
-    if (!email) return fapiFormError(c, "form_identifier_not_found", "Couldn't find your account.");
-
-    const user = cs.users.findOneBy("clerk_id", email.user_id);
+    const user = email
+      ? cs.users.findOneBy("clerk_id", email.user_id)
+      : identifier
+        ? cs.users.findOneBy("username", identifier)
+        : undefined;
     if (!user) return fapiFormError(c, "form_identifier_not_found", "Couldn't find your account.");
 
     const signInId = generateClerkId("sia_");
     const signIn: PendingSignIn = {
       id: signInId,
+      client: resolved.client,
       user,
       status: "needs_first_factor",
       createdSessionId: null,
@@ -225,32 +262,32 @@ export function fapiRoutes({ app, store, webhooks, baseUrl }: RouteContext): voi
     const password = body.password as string | undefined;
     if (password !== undefined) {
       if (user.password_hash !== password) return fapiFormError(c, "form_password_incorrect", PASSWORD_INCORRECT);
-      advanceAfterFirstFactor(cs, signIn, "password");
-      const json = signInJson(cs, signIn);
-      return c.json(await fapiResponse(json, store, baseUrl, signIn.createdSessionId, json));
+      advanceAfterFirstFactor(store, signIn, "password");
     }
 
     const json = signInJson(cs, signIn);
-    return c.json(await fapiResponse(json, store, baseUrl, undefined, json));
+    return respond(c, resolved, json, { signIn: json });
   });
 
   // Sign-in: prepare first factor (e.g. send email code)
   app.post("/v1/client/sign_ins/:signInId/prepare_first_factor", async (c) => {
     const signIn = getSignIns(store).get(c.req.param("signInId"));
     if (!signIn) return clerkError(c, 404, "RESOURCE_NOT_FOUND", "Sign-in not found");
+    const resolved = resolveFlowClient(c, store, signIn.client);
 
     const body = await readFapiBody(c);
     const strategy = (body.strategy as string) ?? "email_code";
     signIn.firstFactorVerification = { status: "unverified", strategy };
 
     const json = signInJson(cs, signIn);
-    return c.json(await fapiResponse(json, store, baseUrl, undefined, json));
+    return respond(c, resolved, json, { signIn: json });
   });
 
   // Sign-in: attempt first factor (password or email_code)
   app.post("/v1/client/sign_ins/:signInId/attempt_first_factor", async (c) => {
     const signIn = getSignIns(store).get(c.req.param("signInId"));
     if (!signIn) return clerkError(c, 404, "RESOURCE_NOT_FOUND", "Sign-in not found");
+    const resolved = resolveFlowClient(c, store, signIn.client);
 
     const body = await readFapiBody(c);
     const strategy = (body.strategy as string) ?? "password";
@@ -261,28 +298,30 @@ export function fapiRoutes({ app, store, webhooks, baseUrl }: RouteContext): voi
       if ((body.code as string) !== EMULATE_EMAIL_CODE) return fapiFormError(c, "form_code_incorrect", CODE_INCORRECT);
     }
 
-    advanceAfterFirstFactor(cs, signIn, strategy);
+    advanceAfterFirstFactor(store, signIn, strategy);
     const json = signInJson(cs, signIn);
-    return c.json(await fapiResponse(json, store, baseUrl, signIn.createdSessionId, json));
+    return respond(c, resolved, json, { signIn: json });
   });
 
   // Sign-in: attempt second factor (TOTP MFA)
   app.post("/v1/client/sign_ins/:signInId/attempt_second_factor", async (c) => {
     const signIn = getSignIns(store).get(c.req.param("signInId"));
     if (!signIn) return clerkError(c, 404, "RESOURCE_NOT_FOUND", "Sign-in not found");
+    const resolved = resolveFlowClient(c, store, signIn.client);
 
     const body = await readFapiBody(c);
     const strategy = (body.strategy as string) ?? "totp";
     if ((body.code as string) !== EMULATE_TOTP_CODE) return fapiFormError(c, "form_code_incorrect", CODE_INCORRECT);
 
     signIn.secondFactorVerification = { status: "verified", strategy };
-    const session = completeSignIn(cs, signIn);
+    completeSignIn(store, signIn);
     const json = signInJson(cs, signIn);
-    return c.json(await fapiResponse(json, store, baseUrl, session.clerk_id, json));
+    return respond(c, resolved, json, { signIn: json });
   });
 
   // Sign-up: create
   app.post("/v1/client/sign_ups", async (c) => {
+    const resolved = resolveClient(c, store);
     const body = await readFapiBody(c);
     const emailAddress = (body.email_address as string) ?? "";
 
@@ -294,6 +333,7 @@ export function fapiRoutes({ app, store, webhooks, baseUrl }: RouteContext): voi
     const signUpId = generateClerkId("sua_");
     const signUp: PendingSignUp = {
       id: signUpId,
+      client: resolved.client,
       email_address: emailAddress,
       password: (body.password as string) ?? null,
       first_name: (body.first_name as string) ?? null,
@@ -305,25 +345,27 @@ export function fapiRoutes({ app, store, webhooks, baseUrl }: RouteContext): voi
     getSignUps(store).set(signUpId, signUp);
 
     const json = signUpJson(signUp);
-    return c.json(await fapiResponse(json, store, baseUrl, undefined, undefined, json));
+    return respond(c, resolved, json, { signUp: json });
   });
 
   // Sign-up: prepare verification (send email code)
   app.post("/v1/client/sign_ups/:signUpId/prepare_verification", async (c) => {
     const signUp = getSignUps(store).get(c.req.param("signUpId"));
     if (!signUp) return clerkError(c, 404, "RESOURCE_NOT_FOUND", "Sign-up not found");
+    const resolved = resolveFlowClient(c, store, signUp.client);
 
     const body = await readFapiBody(c);
     signUp.emailVerification = { status: "unverified", strategy: (body.strategy as string) ?? "email_code" };
 
     const json = signUpJson(signUp);
-    return c.json(await fapiResponse(json, store, baseUrl, undefined, undefined, json));
+    return respond(c, resolved, json, { signUp: json });
   });
 
   // Sign-up: attempt verification (verify email code, create the user)
   app.post("/v1/client/sign_ups/:signUpId/attempt_verification", async (c) => {
     const signUp = getSignUps(store).get(c.req.param("signUpId"));
     if (!signUp) return clerkError(c, 404, "RESOURCE_NOT_FOUND", "Sign-up not found");
+    const resolved = resolveFlowClient(c, store, signUp.client);
 
     const body = await readFapiBody(c);
     if ((body.code as string) !== EMULATE_EMAIL_CODE) return fapiFormError(c, "form_code_incorrect", CODE_INCORRECT);
@@ -374,7 +416,7 @@ export function fapiRoutes({ app, store, webhooks, baseUrl }: RouteContext): voi
     const session = cs.sessions.insert({
       clerk_id: generateClerkId("sess_"),
       user_id: clerkId,
-      client_id: "client_emulate",
+      client_id: signUp.client.client_id,
       status: "active",
       last_active_at: now,
       expire_at: now + 86400,
@@ -382,6 +424,7 @@ export function fapiRoutes({ app, store, webhooks, baseUrl }: RouteContext): voi
       created_at_unix: now,
       updated_at_unix: now,
     });
+    touchClient(store, signUp.client, { last_active_session_id: session.clerk_id });
 
     signUp.status = "complete";
     signUp.createdSessionId = session.clerk_id;
@@ -393,14 +436,14 @@ export function fapiRoutes({ app, store, webhooks, baseUrl }: RouteContext): voi
     dispatchClerkEvent(webhooks, "user.created", userResponse(created, cs.emailAddresses.findBy("user_id", clerkId)));
 
     const json = signUpJson(signUp);
-    return c.json(await fapiResponse(json, store, baseUrl, session.clerk_id, undefined, json));
+    return respond(c, resolved, json, { signUp: json });
   });
 
   // FAPI session token creation
   app.post("/v1/client/sessions/:sessionId/tokens", async (c) => {
     const sessionId = c.req.param("sessionId");
     const session = cs.sessions.findOneBy("clerk_id", sessionId);
-    if (!session) return clerkError(c, 404, "RESOURCE_NOT_FOUND", "Session not found");
+    if (!session || session.status !== "active") return clerkError(c, 404, "RESOURCE_NOT_FOUND", "Session not found");
 
     const user = cs.users.findOneBy("clerk_id", session.user_id);
     if (!user) return clerkError(c, 404, "RESOURCE_NOT_FOUND", "User not found");
@@ -419,59 +462,70 @@ export function fapiRoutes({ app, store, webhooks, baseUrl }: RouteContext): voi
     return c.json({ object: "token", jwt });
   });
 
-  // Session touch
+  // Session touch: clerk-js's setActive. Switching the active session doesn't
+  // change which sessions exist, so __client_uat stays put.
   app.post("/v1/client/sessions/:sessionId/touch", async (c) => {
+    const resolved = resolveClient(c, store);
     const sessionId = c.req.param("sessionId");
     const session = cs.sessions.findOneBy("clerk_id", sessionId);
     if (!session) return clerkError(c, 404, "RESOURCE_NOT_FOUND", "Session not found");
 
     cs.sessions.update(session.id, { last_active_at: nowUnix() });
+    cs.clients.update(resolved.client.id, { last_active_session_id: sessionId });
 
     // clerk-js's setActive reads the touched Session resource from `response`.
     const updated = cs.sessions.findOneBy("clerk_id", sessionId)!;
-    const sessionJson = await buildSessionJson(store, baseUrl, updated);
-    return c.json(await fapiResponse(sessionJson, store, baseUrl, sessionId));
+    const sessionJson = await buildSessionJson(store, baseUrl, updated, clerkApiTokenVersion(c));
+    return respond(c, resolved, sessionJson);
   });
 
-  // Sign out of all sessions — clerk-js sends DELETE /v1/client/sessions
-  // (delivered as POST with ?_method=DELETE due to a Safari CORS workaround).
+  // Sign out of all of this client's sessions — clerk-js sends DELETE
+  // /v1/client/sessions (delivered as POST with ?_method=DELETE due to a Safari
+  // CORS workaround).
   const removeAllSessionsHandler = async (c: Context<AppEnv>) => {
+    const resolved = resolveClient(c, store);
     const now = nowUnix();
-    for (const s of cs.sessions.all()) {
-      if (s.status === "active") {
-        cs.sessions.update(s.id, { status: "ended", updated_at_unix: now });
-      }
+    for (const s of activeSessionsForClient(store, resolved.client)) {
+      cs.sessions.update(s.id, { status: "ended", updated_at_unix: now });
     }
-    return c.json(await fapiResponse(await buildClientJson(store, baseUrl, undefined, undefined, clerkApiTokenVersion(c)), store, baseUrl));
+    touchClient(store, resolved.client, { last_active_session_id: null });
+    const { client } = await fapiResponse(null, store, baseUrl, resolved.client, clerkApiTokenVersion(c));
+    return respond(c, resolved, client);
   };
   app.post("/v1/client/sessions", removeAllSessionsHandler);
   app.delete("/v1/client/sessions", removeAllSessionsHandler);
 
-  // Single session end
-  app.delete("/v1/client/sessions/:sessionId", async (c) => {
-    const sessionId = c.req.param("sessionId");
+  // Single session end (sign out of one session)
+  const endSessionHandler = async (c: Context<AppEnv>) => {
+    const resolved = resolveClient(c, store);
+    const sessionId = c.req.param("sessionId")!;
     const session = cs.sessions.findOneBy("clerk_id", sessionId);
     if (!session) return clerkError(c, 404, "RESOURCE_NOT_FOUND", "Session not found");
 
     cs.sessions.update(session.id, { status: "ended", updated_at_unix: nowUnix() });
+    touchClient(store, resolved.client);
 
-    return c.json(await fapiResponse({ object: "session", id: sessionId, status: "ended" }, store, baseUrl));
-  });
+    return respond(c, resolved, { object: "session", id: sessionId, status: "ended" });
+  };
+  app.delete("/v1/client/sessions/:sessionId", endSessionHandler);
+  app.post("/v1/client/sessions/:sessionId/end", endSessionHandler);
+  app.post("/v1/client/sessions/:sessionId/remove", endSessionHandler);
 
   // User's organization memberships (FAPI path)
   app.get("/v1/me/organization_memberships", async (c) => {
+    const resolved = resolveClient(c, store);
     const empty = { data: [], total_count: 0 };
     const sessionId = c.req.query("_clerk_session_id");
-    if (!sessionId) return c.json(await fapiResponse(empty, store, baseUrl));
+    if (!sessionId) return respond(c, resolved, empty);
 
     const session = cs.sessions.findOneBy("clerk_id", sessionId);
-    if (!session) return c.json(await fapiResponse(empty, store, baseUrl));
+    if (!session) return respond(c, resolved, empty);
 
     const data = cs.memberships
       .findBy("user_id", session.user_id)
       .map((m) => fapiMembershipJson(cs, m))
       .filter((m): m is Record<string, unknown> => m !== null);
 
-    return c.json(await fapiResponse({ data, total_count: data.length }, store, baseUrl, sessionId));
+    return respond(c, resolved, { data, total_count: data.length });
   });
 }

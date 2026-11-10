@@ -35,7 +35,7 @@ export { createServer, type ServerOptions } from "./server.js";
 export { type ServicePlugin, type RouteContext } from "./plugin.js";
 
 // --- Webhooks ---
-export { WebhookDispatcher, type WebhookSubscription, type WebhookDelivery } from "./webhooks.js";
+export { WebhookDispatcher, svixSignature, type WebhookSubscription, type WebhookDelivery } from "./webhooks.js";
 
 // --- Errors ---
 export {

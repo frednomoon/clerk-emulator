@@ -22,5 +22,8 @@ export function dispatchClerkEvent(
   type: ClerkWebhookEventType,
   data: Record<string, unknown>,
 ): void {
-  webhooks.dispatch(type, undefined, { type, data }, "clerk").catch(() => {});
+  // Shaped like Clerk's event envelope, so handlers written against real
+  // deliveries (event.type, event.data) work unchanged.
+  const payload = { object: "event", type, data, timestamp: Date.now(), instance_id: "ins_emulate" };
+  webhooks.dispatch(type, undefined, payload, "clerk").catch(() => {});
 }

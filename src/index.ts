@@ -18,6 +18,7 @@ import { organizationDomainRoutes } from "./routes/organization-domains.js";
 import { m2mTokenRoutes } from "./routes/m2m-tokens.js";
 import { testingTokenRoutes } from "./routes/testing-tokens.js";
 import { fapiRoutes } from "./routes/fapi.js";
+import { handshakeRoutes } from "./routes/handshake.js";
 import { clerkJsProxyRoutes } from "./routes/clerk-js-proxy.js";
 import { getClerkStore } from "./store.js";
 
@@ -27,6 +28,13 @@ export * from "./entities.js";
 // Re-export the server bootstrap so consumers can spin up the emulator
 // without reaching into the internal framework module.
 export { createServer, serve, type ServerOptions } from "./framework/index.js";
+export {
+  DEFAULT_PUBLISHABLE_KEY,
+  cookieSuffix,
+  getEmulatorConfig,
+  setEmulatorConfig,
+  type ClerkEmulatorConfig,
+} from "./routes/fapi-client.js";
 
 export interface ClerkSeedConfig {
   users?: Array<{
@@ -66,6 +74,8 @@ export interface ClerkSeedConfig {
     url: string;
     events?: string[];
     secret?: string;
+    /** Defaults to "svix" for a `whsec_` secret, as Clerk signs its webhooks, else "github". */
+    signing?: "github" | "svix";
   }>;
 }
 
@@ -236,6 +246,7 @@ export function seedFromConfig(store: Store, _baseUrl: string, config: ClerkSeed
         active: true,
         owner: "clerk",
         secret: hookCfg.secret,
+        signing: hookCfg.signing ?? (hookCfg.secret?.startsWith("whsec_") ? "svix" : "github"),
       });
     }
   }
@@ -267,6 +278,7 @@ export const clerkPlugin: ServicePlugin = {
     m2mTokenRoutes(ctx);
     testingTokenRoutes(ctx);
     fapiRoutes(ctx);
+    handshakeRoutes(ctx);
     clerkJsProxyRoutes(ctx);
   },
   seed(store: Store, baseUrl: string): void {

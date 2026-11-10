@@ -43,7 +43,7 @@ describe("Clerk plugin - FAPI (Frontend API)", () => {
 
     const client = body.response as Record<string, unknown>;
     expect(client.object).toBe("client");
-    expect(client.id).toBe("client_emulate");
+    expect(client.id).toMatch(/^client_/);
     expect(Array.isArray(client.sessions)).toBe(true);
   });
 

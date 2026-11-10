@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { SignJWT, exportJWK, exportSPKI, generateKeyPair } from "jose";
+import { SignJWT, calculateJwkThumbprint, exportJWK, exportSPKI, generateKeyPair } from "jose";
 import type { Context } from "../framework/index.js";
 import type { AppEnv, RouteContext, Store } from "../framework/index.js";
 import {
@@ -17,8 +17,14 @@ import { userDisplayName } from "../helpers.js";
 import { clerkError, type PrimaryOrgClaims } from "../route-helpers.js";
 import { getClerkStore } from "../store.js";
 
-const keyPairPromise = generateKeyPair("RS256");
-const KID = "emulate-clerk-1";
+// A fresh key pair per process. The key id is derived from the public key, so
+// a restarted emulator's key gets a new kid: SDKs that cached the previous
+// JWKS see an unknown kid and refetch, instead of verifying new tokens against
+// the old key and rejecting them as badly signed.
+const keyPairPromise = generateKeyPair("RS256").then(async (pair) => {
+  const thumbprint = await calculateJwkThumbprint(await exportJWK(pair.publicKey));
+  return { ...pair, kid: `ins_emulate_${thumbprint.slice(0, 16)}` };
+});
 
 const CODE_TTL_MS = 10 * 60 * 1000;
 
@@ -59,7 +65,7 @@ export async function createSessionToken(
   orgClaims: PrimaryOrgClaims,
   version: SessionTokenVersion = 1,
 ): Promise<string> {
-  const { privateKey } = await keyPairPromise;
+  const { privateKey, kid } = await keyPairPromise;
   const now = Math.floor(Date.now() / 1000);
 
   const claims: Record<string, unknown> = {
@@ -91,7 +97,7 @@ export async function createSessionToken(
   }
 
   return new SignJWT(claims)
-    .setProtectedHeader({ alg: "RS256", kid: KID, typ: "JWT" })
+    .setProtectedHeader({ alg: "RS256", kid, typ: "JWT" })
     .setIssuer(baseUrl)
     .setSubject(user.clerk_id)
     .setIssuedAt(now)
@@ -135,15 +141,15 @@ export function oauthRoutes({ app, store, baseUrl, tokenMap }: RouteContext): vo
   });
 
   app.get("/v1/jwks", async (c) => {
-    const { publicKey } = await keyPairPromise;
+    const { publicKey, kid } = await keyPairPromise;
     const jwk = await exportJWK(publicKey);
     return c.json({
-      keys: [{ ...jwk, kid: KID, use: "sig", alg: "RS256" }],
+      keys: [{ ...jwk, kid, use: "sig", alg: "RS256" }],
     });
   });
 
   app.get("/_emulate/jwt-public-key", async (c) => {
-    const { publicKey } = await keyPairPromise;
+    const { publicKey, kid } = await keyPairPromise;
     const pem = await exportSPKI(publicKey);
     return c.text(pem);
   });
@@ -406,7 +412,7 @@ export function oauthRoutes({ app, store, baseUrl, tokenMap }: RouteContext): vo
       scopes: pending.scope.split(/\s+/).filter(Boolean),
     });
 
-    const { privateKey } = await keyPairPromise;
+    const { privateKey, kid } = await keyPairPromise;
     const nowSec = Math.floor(Date.now() / 1000);
     const emails = clerkStore.emailAddresses.findBy("user_id", user.clerk_id);
     const primaryEmail = emails.find((e) => e.is_primary) ?? emails[0];
@@ -417,7 +423,7 @@ export function oauthRoutes({ app, store, baseUrl, tokenMap }: RouteContext): vo
       email_verified: primaryEmail?.verification_status === "verified",
       name: [user.first_name, user.last_name].filter(Boolean).join(" ") || undefined,
     })
-      .setProtectedHeader({ alg: "RS256", kid: KID, typ: "JWT" })
+      .setProtectedHeader({ alg: "RS256", kid, typ: "JWT" })
       .setIssuer(baseUrl)
       .setSubject(user.clerk_id)
       .setAudience(clientId || "default")
@@ -458,4 +464,4 @@ export function oauthRoutes({ app, store, baseUrl, tokenMap }: RouteContext): vo
   });
 }
 
-export { keyPairPromise, KID };
+export { keyPairPromise };

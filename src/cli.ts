@@ -1,7 +1,8 @@
 #!/usr/bin/env node
+import { readFile } from "node:fs/promises";
 import { serve } from "@hono/node-server";
 import { createServer, filePersistence } from "./framework/index.js";
-import { clerkPlugin, seedFromConfig } from "./index.js";
+import { DEFAULT_PUBLISHABLE_KEY, clerkPlugin, seedFromConfig, setEmulatorConfig, type ClerkSeedConfig } from "./index.js";
 
 const port = Number(process.env.PORT ?? 4000);
 const host = process.env.HOST ?? "0.0.0.0";
@@ -13,7 +14,21 @@ const machineKey = process.env.CLERK_MACHINE_KEY ?? "ak_test_emulate";
 const persistArgIdx = process.argv.indexOf("--persist");
 const persistPath = persistArgIdx !== -1 ? process.argv[persistArgIdx + 1] : process.env.CLERK_PERSIST;
 
-const { app, store, baseUrl } = createServer(clerkPlugin, {
+// --seed <file> (or CLERK_SEED=<file>): a JSON ClerkSeedConfig to seed instead
+// of the default fixtures (users with fixed ids, metadata, orgs, webhooks).
+const seedArgIdx = process.argv.indexOf("--seed");
+const seedPath = seedArgIdx !== -1 ? process.argv[seedArgIdx + 1] : process.env.CLERK_SEED;
+
+// The publishable key your app is configured with. Clerk derives its cookie
+// names from it, so cookies the emulator sets only match when this does.
+const publishableKey = process.env.CLERK_PUBLISHABLE_KEY ?? DEFAULT_PUBLISHABLE_KEY;
+
+// CLERK_WEBHOOK_URL (+ CLERK_WEBHOOK_SECRET, a whsec_ secret): deliver every
+// event there, signed with Svix like Clerk's webhooks.
+const webhookUrl = process.env.CLERK_WEBHOOK_URL;
+const webhookSecret = process.env.CLERK_WEBHOOK_SECRET;
+
+const { app, store, webhooks, baseUrl } = createServer(clerkPlugin, {
   port,
   tokens: {
     [secretKey]: { login: "admin", id: 1, scopes: [] },
@@ -39,29 +54,47 @@ if (persistence) {
 }
 
 if (!restored) {
-  clerkPlugin.seed?.(store, baseUrl);
-  seedFromConfig(store, baseUrl, {
-    users: [
-      { email_addresses: ["alice@example.com"], first_name: "Alice", last_name: "Smith", password: "alice123" },
-      { email_addresses: ["bob@example.com"], first_name: "Bob", last_name: "Jones" },
-      {
-        email_addresses: ["mfa@example.com"],
-        first_name: "Mfa",
-        last_name: "User",
-        password: "mfa12345",
-        totp_enabled: true,
-      },
-    ],
-    organizations: [
-      {
-        name: "Acme Corp",
-        slug: "acme",
-        members: [
-          { email: "alice@example.com", role: "admin" },
-          { email: "bob@example.com", role: "member" },
-        ],
-      },
-    ],
+  if (seedPath) {
+    const config = JSON.parse(await readFile(seedPath, "utf8")) as ClerkSeedConfig;
+    seedFromConfig(store, baseUrl, config, webhooks);
+  } else {
+    clerkPlugin.seed?.(store, baseUrl);
+    seedFromConfig(store, baseUrl, {
+      users: [
+        { email_addresses: ["alice@example.com"], first_name: "Alice", last_name: "Smith", password: "alice123" },
+        { email_addresses: ["bob@example.com"], first_name: "Bob", last_name: "Jones" },
+        {
+          email_addresses: ["mfa@example.com"],
+          first_name: "Mfa",
+          last_name: "User",
+          password: "mfa12345",
+          totp_enabled: true,
+        },
+      ],
+      organizations: [
+        {
+          name: "Acme Corp",
+          slug: "acme",
+          members: [
+            { email: "alice@example.com", role: "admin" },
+            { email: "bob@example.com", role: "member" },
+          ],
+        },
+      ],
+    });
+  }
+}
+
+setEmulatorConfig(store, { publishableKey });
+
+if (webhookUrl) {
+  webhooks.register({
+    url: webhookUrl,
+    events: ["*"],
+    active: true,
+    owner: "clerk",
+    secret: webhookSecret,
+    signing: "svix",
   });
 }
 
@@ -81,11 +114,15 @@ serve({ fetch: app.fetch, port, hostname: host }, () => {
       `  Backend API:  ${baseUrl}`,
       `  Secret key:   ${secretKey}`,
       `  Machine key:  ${machineKey}`,
+      `  Publishable:  ${publishableKey}`,
+      ...(seedPath ? [`  Seeded from:  ${seedPath}`] : []),
       ...(persistPath ? [`  Persisting:   ${persistPath}`] : []),
+      ...(webhookUrl ? [`  Webhooks to:  ${webhookUrl}`] : []),
       "",
       "  Point the Clerk SDK at it with:",
       `    CLERK_SECRET_KEY=${secretKey}`,
       `    CLERK_API_URL=${baseUrl}`,
+      `    CLERK_PUBLISHABLE_KEY=${publishableKey}  (same key in the browser)`,
       "",
     ].join("\n") + "\n",
   );

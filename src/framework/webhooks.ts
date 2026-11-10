@@ -1,4 +1,4 @@
-import { createHmac } from "crypto";
+import { createHmac, randomUUID } from "crypto";
 
 export interface WebhookSubscription {
   id: number;
@@ -6,8 +6,21 @@ export interface WebhookSubscription {
   events: string[];
   active: boolean;
   secret?: string;
+  /**
+   * How deliveries are signed. "github" (the default) sends X-Hub-Signature-256;
+   * "svix" sends the svix-id / svix-timestamp / svix-signature headers that
+   * Clerk's webhooks use, with `secret` as the endpoint's `whsec_` signing secret.
+   */
+  signing?: "github" | "svix";
   owner: string;
   repo?: string;
+}
+
+/** Svix's v1 signature: HMAC-SHA256 of `${id}.${timestamp}.${body}`, keyed by the base64 secret. */
+export function svixSignature(secret: string, id: string, timestamp: number, body: string): string {
+  const key = Buffer.from(secret.replace(/^whsec_/, ""), "base64");
+  const digest = createHmac("sha256", key).update(`${id}.${timestamp}.${body}`).digest("base64");
+  return `v1,${digest}`;
 }
 
 export interface WebhookDelivery {
@@ -103,22 +116,33 @@ export class WebhookDispatcher {
 
       const body = JSON.stringify(payload);
 
-      const signatureHeaders: Record<string, string> = {};
-      if (sub.secret) {
-        const hmac = createHmac("sha256", sub.secret).update(body).digest("hex");
-        signatureHeaders["X-Hub-Signature-256"] = `sha256=${hmac}`;
+      let headers: Record<string, string>;
+      if (sub.signing === "svix") {
+        const messageId = `msg_${randomUUID().replace(/-/g, "")}`;
+        const timestamp = Math.floor(Date.now() / 1000);
+        headers = {
+          "Content-Type": "application/json",
+          "svix-id": messageId,
+          "svix-timestamp": String(timestamp),
+          ...(sub.secret ? { "svix-signature": svixSignature(sub.secret, messageId, timestamp, body) } : {}),
+        };
+      } else {
+        headers = {
+          "Content-Type": "application/json",
+          "X-GitHub-Event": event,
+          "X-GitHub-Delivery": String(delivery.id),
+        };
+        if (sub.secret) {
+          const hmac = createHmac("sha256", sub.secret).update(body).digest("hex");
+          headers["X-Hub-Signature-256"] = `sha256=${hmac}`;
+        }
       }
 
       try {
         const start = Date.now();
         const response = await fetch(sub.url, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-GitHub-Event": event,
-            "X-GitHub-Delivery": String(delivery.id),
-            ...signatureHeaders,
-          },
+          headers,
           body,
           signal: AbortSignal.timeout(10000),
         });

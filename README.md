@@ -29,7 +29,24 @@ npx clerk-emulator
 # Secret key:   sk_test_emulate
 ```
 
-Configure via env: `PORT`, `HOST`, `CLERK_SECRET_KEY`, `CLERK_MACHINE_KEY`. Add `--persist <file>` (or `CLERK_PERSIST`) to keep state across restarts.
+Configure via env: `PORT`, `HOST`, `CLERK_SECRET_KEY`, `CLERK_MACHINE_KEY`, `CLERK_PUBLISHABLE_KEY`. Add `--persist <file>` (or `CLERK_PERSIST`) to keep state across restarts, and `--seed <file>` (or `CLERK_SEED`) to seed from a JSON [`ClerkSeedConfig`](./src/index.ts) instead of the default fixtures:
+
+```json
+{
+  "users": [
+    {
+      "clerk_id": "user_2f6K9jIXfKxKKJGpSlfHqpm5x95",
+      "username": "dev",
+      "email_addresses": ["dev@example.com"],
+      "password": "supersecret123",
+      "public_metadata": { "role": "admin" }
+    }
+  ],
+  "webhooks": [{ "url": "http://localhost:3000/api/webhooks/clerk", "secret": "whsec_..." }]
+}
+```
+
+`CLERK_PUBLISHABLE_KEY` should be the key your app uses (default `pk_test_ZW11bGF0ZS5leGFtcGxlLmNvbSQ`): Clerk names cookies with a suffix derived from it, so the cookies the emulator sets only line up when it matches. Webhooks with a `whsec_` secret are signed with Svix headers like Clerk's, so `verifyWebhook` and `svix` accept them; `CLERK_WEBHOOK_URL` + `CLERK_WEBHOOK_SECRET` register one from the environment.
 
 Point the backend SDK at it:
 
@@ -71,6 +88,33 @@ server: {
 
 Vanilla clerk-js is the same idea: `new Clerk(pk, { proxyUrl: "/__clerk" })`. See [`e2e/`](./e2e) for complete React, `@clerk/clerk-react`, and vanilla setups.
 
+### Next.js (`@clerk/nextjs`)
+
+`clerkMiddleware` and `auth()` work against the emulator, including the handshake the middleware uses to refresh missing or stale cookies. Two differences from the client-only setup:
+
+- The proxy URL must be **absolute**: the server resolves a relative one against `window`. As clerk-js upgrades absolute proxy URLs to `https`, run the dev server over https (`next dev --experimental-https`).
+- Point the server SDK at the emulator and set your own sign-in page, since the default is Clerk's hosted one.
+
+```bash
+# .env.local
+CLERK_SECRET_KEY=sk_test_emulate
+CLERK_API_URL=http://localhost:4000
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_ZW11bGF0ZS5leGFtcGxlLmNvbSQ
+NEXT_PUBLIC_CLERK_PROXY_URL=https://localhost:3000/__clerk
+NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in
+```
+
+```js
+// next.config.mjs
+async rewrites() {
+  return [{ source: "/__clerk/:path*", destination: "http://localhost:4000/:path*" }];
+},
+```
+
+### Clients and sessions
+
+Each browser or app install gets its own client, as with real Clerk, so two browsers can be signed in as different users. The emulator identifies a client the way Clerk does: by the dev browser token clerk-js sends (`__clerk_db_jwt`), the `__client` cookie it sets on its own responses, or, for native apps, the `Authorization` header. Behind a same-origin proxy it also sets `__client_uat` and, for a development key, `__clerk_db_jwt`, so the backend SDKs see a consistent signed-in state.
+
 ## What's supported
 
 | Capability | Details |
@@ -80,8 +124,9 @@ Vanilla clerk-js is the same idea: `new Clerk(pk, { proxyUrl: "/__clerk" })`. Se
 | Sessions & tokens | session CRUD, JWT minting, v1/v2 negotiation (`clerk-api-version` / `__clerk_api_version`) |
 | M2M tokens | create, verify, revoke |
 | OAuth 2.0 / OIDC | authorize, token, userinfo, JWKS |
-| Frontend API (FAPI) | sign-in, MFA (TOTP), sign-up |
-| Webhooks | Clerk-shaped resource events |
+| Frontend API (FAPI) | sign-in (email or username), MFA (TOTP), sign-up, per-browser and native clients |
+| Handshake | `GET /v1/client/handshake` (nonce and token formats), `GET /v1/clients/handshake_payload` |
+| Webhooks | Clerk-shaped resource events, Svix-signed for `whsec_` secrets |
 | Testing tokens | `@clerk/testing` compatible — `POST /v1/testing_tokens`, `__clerk_testing_token` |
 | _Out of scope_ | social sign-in, passkeys, SAML / enterprise SSO, multi-session, billing, profile management |
 
@@ -95,9 +140,10 @@ Verified in CI against:
 | Frontend (React) | `@clerk/clerk-react` | latest 5.x | Core 2 (LTS) |
 | Frontend (vanilla) | `@clerk/clerk-js` | latest 5.x, 6.x | Core 2 (LTS), Core 3 |
 | Backend | `@clerk/backend` | latest 2.x, 3.x | Core 3 |
+| Full stack | `@clerk/nextjs` | 6.x (manually, sign-in through `clerkMiddleware` and `auth()`) | Core 2 |
 | Runtime | Node.js | 20, 22, 24 | — |
 
-Not yet tested: `@clerk/backend` 0.x (Core 2 LTS, pre-Core-3 API) and `@clerk/nextjs`.
+Not yet tested: `@clerk/backend` 0.x (Core 2 LTS, pre-Core-3 API). `@clerk/nextjs` has no CI cell yet.
 
 ## Tests
 
