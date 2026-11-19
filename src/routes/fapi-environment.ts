@@ -1,6 +1,17 @@
 // Static FAPI environment config returned by GET/POST /v1/environment.
 // clerk-js reads this on Clerk.load() to learn auth methods, display, and org settings.
-export function buildEnvironmentJson(baseUrl: string): Record<string, unknown> {
+// Social connections the emulator offers. Their "provider" is the emulator's own
+// account picker (GET /v1/oauth_emulate/authorize), not the real provider.
+const SOCIAL_PROVIDERS: Record<string, string> = { oauth_google: "Google", oauth_apple: "Apple", oauth_github: "GitHub" };
+
+export function buildEnvironmentJson(baseUrl: string, opts: { usernameRequired?: boolean } = {}): Record<string, unknown> {
+  const social = Object.fromEntries(
+    Object.entries(SOCIAL_PROVIDERS).map(([strategy, name]) => [
+      strategy,
+      { enabled: true, required: false, authenticatable: true, block_email_subaddresses: false, strategy, name, logo_url: null },
+    ]),
+  );
+
   return {
     api_keys_settings: { user_api_keys_enabled: false, orgs_api_keys_enabled: false },
     auth_config: {
@@ -85,12 +96,12 @@ export function buildEnvironmentJson(baseUrl: string): Record<string, unknown> {
         },
         first_name: { enabled: true, required: false },
         last_name: { enabled: true, required: false },
-        username: { enabled: false, required: false },
+        username: { enabled: !!opts.usernameRequired, required: !!opts.usernameRequired },
         phone_number: { enabled: false, required: false },
         web3_wallet: { enabled: false, required: false },
       },
       actions: { delete_self: true, create_organization: true },
-      social: {},
+      social,
       enterprise_sso: { enabled: false, self_serve_sso: false },
       sign_in: { second_factor: { required: false, enabled: false } },
       sign_up: { allowlist_only: false, progressive: true, captcha_enabled: false, mode: "public", legal_consent_enabled: false },

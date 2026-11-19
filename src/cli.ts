@@ -23,6 +23,10 @@ const seedPath = seedArgIdx !== -1 ? process.argv[seedArgIdx + 1] : process.env.
 // names from it, so cookies the emulator sets only match when this does.
 const publishableKey = process.env.CLERK_PUBLISHABLE_KEY ?? DEFAULT_PUBLISHABLE_KEY;
 
+// CLERK_USERNAME_REQUIRED=1: sign-up needs a username, as on instances that
+// require one. An OAuth sign-up then stops at missing_requirements for it.
+const usernameRequired = ["1", "true"].includes(process.env.CLERK_USERNAME_REQUIRED ?? "");
+
 // CLERK_WEBHOOK_URL (+ CLERK_WEBHOOK_SECRET, a whsec_ secret): deliver every
 // event there, signed with Svix like Clerk's webhooks.
 const webhookUrl = process.env.CLERK_WEBHOOK_URL;
@@ -85,7 +89,7 @@ if (!restored) {
   }
 }
 
-setEmulatorConfig(store, { publishableKey });
+setEmulatorConfig(store, { publishableKey, usernameRequired });
 
 if (webhookUrl) {
   webhooks.register({

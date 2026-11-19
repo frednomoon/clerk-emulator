@@ -31,7 +31,11 @@ export const DEFAULT_PUBLISHABLE_KEY = "pk_test_ZW11bGF0ZS5leGFtcGxlLmNvbSQ";
 
 export interface ClerkEmulatorConfig {
   publishableKey: string;
+  /** Sign-up requires a username, so an OAuth sign-up stops at missing_requirements for it. */
+  usernameRequired: boolean;
 }
+
+const DEFAULT_CONFIG: ClerkEmulatorConfig = { publishableKey: DEFAULT_PUBLISHABLE_KEY, usernameRequired: false };
 
 const CONFIG_KEY = "clerk.config";
 
@@ -40,7 +44,7 @@ export function setEmulatorConfig(store: Store, config: Partial<ClerkEmulatorCon
 }
 
 export function getEmulatorConfig(store: Store): ClerkEmulatorConfig {
-  return store.getData<ClerkEmulatorConfig>(CONFIG_KEY) ?? { publishableKey: DEFAULT_PUBLISHABLE_KEY };
+  return { ...DEFAULT_CONFIG, ...store.getData<Partial<ClerkEmulatorConfig>>(CONFIG_KEY) };
 }
 
 /** Mirrors `getCookieSuffix` in @clerk/shared: first 8 chars of base64(sha1(pk)), URL-safe. */

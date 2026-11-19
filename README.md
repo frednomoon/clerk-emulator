@@ -29,7 +29,7 @@ npx clerk-emulator
 # Secret key:   sk_test_emulate
 ```
 
-Configure via env: `PORT`, `HOST`, `CLERK_SECRET_KEY`, `CLERK_MACHINE_KEY`, `CLERK_PUBLISHABLE_KEY`. Add `--persist <file>` (or `CLERK_PERSIST`) to keep state across restarts, and `--seed <file>` (or `CLERK_SEED`) to seed from a JSON [`ClerkSeedConfig`](./src/index.ts) instead of the default fixtures:
+Configure via env: `PORT`, `HOST`, `CLERK_SECRET_KEY`, `CLERK_MACHINE_KEY`, `CLERK_PUBLISHABLE_KEY`, `CLERK_USERNAME_REQUIRED`. Add `--persist <file>` (or `CLERK_PERSIST`) to keep state across restarts, and `--seed <file>` (or `CLERK_SEED`) to seed from a JSON [`ClerkSeedConfig`](./src/index.ts) instead of the default fixtures:
 
 ```json
 {
@@ -115,6 +115,16 @@ async rewrites() {
 
 Each browser or app install gets its own client, as with real Clerk, so two browsers can be signed in as different users. The emulator identifies a client the way Clerk does: by the dev browser token clerk-js sends (`__clerk_db_jwt`), the `__client` cookie it sets on its own responses, or, for native apps, the `Authorization` header. Behind a same-origin proxy it also sets `__client_uat` and, for a development key, `__clerk_db_jwt`, so the backend SDKs see a consistent signed-in state.
 
+### Social sign-in (Google, Apple, GitHub)
+
+`signIn.authenticateWithRedirect()` on the web and `useSSO()` in Expo work without real provider credentials. Instead of Google's consent screen, the browser opens the emulator's account picker at `/v1/oauth_emulate/authorize`:
+
+- **An existing account** signs in, and the browser goes to `redirectUrlComplete`, or `redirectUrl` when there is none.
+- **A new email** goes back to `redirectUrl` with the sign-in `transferable`, and `signUp.create({ transfer: true })` makes the account. `AuthenticateWithRedirectCallback` does that for you.
+- **Cancel** goes back to `redirectUrl` with the sign-in still unverified.
+
+Native redirects carry a `rotating_token_nonce`, as from Clerk. Set `CLERK_USERNAME_REQUIRED=1` to require a username at sign-up, as some instances do: a new OAuth account then stops at `missing_requirements` until `signUp.update({ username })`.
+
 ## What's supported
 
 | Capability | Details |
@@ -125,10 +135,11 @@ Each browser or app install gets its own client, as with real Clerk, so two brow
 | M2M tokens | create, verify, revoke |
 | OAuth 2.0 / OIDC | authorize, token, userinfo, JWKS |
 | Frontend API (FAPI) | sign-in (email or username), MFA (TOTP), sign-up, per-browser and native clients |
+| Social sign-in | `oauth_google`, `oauth_apple`, `oauth_github` through an emulated provider page; sign-up transfer |
 | Handshake | `GET /v1/client/handshake` (nonce and token formats), `GET /v1/clients/handshake_payload` |
 | Webhooks | Clerk-shaped resource events, Svix-signed for `whsec_` secrets |
 | Testing tokens | `@clerk/testing` compatible — `POST /v1/testing_tokens`, `__clerk_testing_token` |
-| _Out of scope_ | social sign-in, passkeys, SAML / enterprise SSO, multi-session, billing, profile management |
+| _Out of scope_ | real social providers, linking a provider to a signed-in user, passkeys, SAML / enterprise SSO, multi-session, billing, profile management |
 
 ## Compatibility
 
